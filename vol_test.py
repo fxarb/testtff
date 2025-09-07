@@ -1,9 +1,12 @@
-
 """Root finder functions using newton method."""
 
 import tensorflow as tf
-
 import numpy as np
+import datetime
+import io
+import pandas as pd
+import math
+from scipy.stats import mvn, norm
 
 def default_relative_root_tolerance(dtype):
   """Returns the default relative root tolerance used for a TensorFlow dtype."""
@@ -278,14 +281,14 @@ def implied_vol(*,
     initial_volatilities = tf.convert_to_tensor(
           initial_volatilities, dtype=dtype, name='initial_volatilities')
 
-    implied_vols, converged, failed = _newton_implied_vol(
+    implied_vols, converged, failed = _newton_implied_vol_tff(
         prices, strikes, expiries, forwards, discount_factors, is_call_options,
         initial_volatilities,
         tolerance, max_iterations)
     return implied_vols, converged, failed
 
 
-def _newton_implied_vol(prices, strikes, expiries, forwards, discount_factors,
+def _newton_implied_vol_tff(prices, strikes, expiries, forwards, discount_factors,
                         is_call_options, initial_volatilities, tolerance, max_iterations):
   """Uses Newton's method to find Black Scholes implied volatilities of options.
 
@@ -456,10 +459,6 @@ def _make_black_lognormal_objective_and_vega_func(
   return _black_objective_and_vega
 
 
-import math
-import numpy as np
-from scipy.stats import mvn, norm
-
 class _GBS_Limits:
     # An GBS model will return an error if an out-of-bound input is input
     MAX32 = 2147483248.0
@@ -533,10 +532,10 @@ def _gbs(option_type, fs, x, t, r, b, v):
 
 
 
-def _newton_implied_vol(val_fn, option_type, x, fs, t, b, r, cp, precision=.00001, max_steps=100):
+def _newton_implied_vol_scipy(val_fn, option_type, x, fs, t, b, r, cp, precision=.00001, max_steps=100):
 
     # Estimate starting Vol, making sure it is allowable range
-    v = _approx_implied_vol(option_type, fs, x, t, r, b, cp)
+    v = 0.5 # Replaced missing _approx_implied_vol with a constant
     v = max(_GBS_Limits.MIN_V, v)
     v = min(_GBS_Limits.MAX_V, v)
 
@@ -548,7 +547,8 @@ def _newton_implied_vol(val_fn, option_type, x, fs, t, b, r, cp, precision=.0000
     # Newton-Raphson Search
     countr = 0
     while precision <= abs(cp - value) <= min_diff and countr < max_steps:
-
+        if vega == 0: # Avoid division by zero
+             break
         v = v - (value - cp) / vega
         if (v > _GBS_Limits.MAX_V) or (v < _GBS_Limits.MIN_V):
             break
@@ -574,7 +574,7 @@ def _newton_implied_vol(val_fn, option_type, x, fs, t, b, r, cp, precision=.0000
 # Find the Implied Volatility of an European (GBS) Option given a price
 # using Newton-Raphson method for greater speed since Vega is available
 def _gbs_implied_vol(option_type, fs, x, t, r, b, cp, precision=.00001, max_steps=100):
-    return _newton_implied_vol(_gbs, option_type, x, fs, t, b, r, cp, precision, max_steps)
+    return _newton_implied_vol_scipy(_gbs, option_type, x, fs, t, b, r, cp, precision, max_steps)
 
 
 def euro_implied_vol(option_type, fs, x, t, r, q, cp):
@@ -594,3 +594,92 @@ def euro_implied_vol(option_type, fs, x, t, r, q, cp):
     """
     b = r - q
     return _gbs_implied_vol(option_type, fs, x, t, r, b, cp)
+
+if __name__ == '__main__':
+    sheets = """
+|合约交易代码|当前价|涨跌幅|前结价|行权价|合约交易代码|当前价|涨跌幅|前结价|
+|---|---|---|---|---|---|---|---|---|
+|588000C2603M00850|0.4609|6.69%|0.4320|0.850|588000P2603M00850|0.0091|-19.47%|0.0113|
+|588000C2603M00900|0.4207|10.13%|0.3820|0.900|588000P2603M00900|0.0127|-23.49%|0.0166|
+|588000C2603M00950|0.3762|13.31%|0.3320|0.950|588000P2603M00950|0.0182|-23.85%|0.0239|
+|588000C2603M01000|0.3275|12.89%|0.2901|1.000|588000P2603M01000|0.0260|-21.92%|0.0333|
+|588000C2603M01050|0.2911|15.20%|0.2527|1.050|588000P2603M01050|0.0350|-25.05%|0.0467|
+|588000C2603M01100|0.2470|13.25%|0.2181|1.100|588000P2603M01100|0.0503|-21.65%|0.0642|
+|588000C2603M01150|0.2200|17.15%|0.1878|1.150|588000P2603M01150|0.0685|-17.17%|0.0827|
+|588000C2603M01200|0.1939|19.47%|0.1623|1.200|588000P2603M01200|0.0855|-17.71%|0.1039|
+|588000C2603M01250|0.1650|19.31%|0.1383|1.250|588000P2603M01250|0.1135|-14.08%|0.1321|
+|588000C2603M01300|0.1458|16.73%|0.1249|1.300|588000P2603M01300|0.1391|-12.95%|0.1598|
+|588000C2603M01350|0.1266|21.61%|0.1041|1.350|588000P2603M01350|0.1711|-13.63%|0.1981|
+|588000C2603M01400|0.1131|23.07%|0.0919|1.400|588000P2603M01400|0.2070|-11.69%|0.2344|
+|588000C2603M01450|0.1000|19.47%|0.0837|1.450|588000P2603M01450|0.2435|-10.67%|0.2726|
+|588000C2603M01500|0.0905|22.96%|0.0736|1.500|588000P2603M01500|0.2843|-9.83%|0.3153|
+|588000C2603M01550|0.0820|24.24%|0.0660|1.550|588000P2603M01550|0.3300|-7.77%|0.3578|
+|588000C2603M01600|0.0722|23.42%|0.0585|1.600|588000P2603M01600|0.3668|-6.83%|0.3937|
+|588000C2603M01650|0.0667|31.04%|0.0509|1.650|588000P2603M01650|0.4182|-4.89%|0.4397|
+"""
+    S = 1.326
+    r = 0.02
+    q = 0.00
+    expiry_date_dt = datetime.datetime(2026, 3, 20)
+    today_date_dt = datetime.datetime(2025, 9, 7)
+    t = (expiry_date_dt - today_date_dt).days / 365.0
+
+    # The data is a bit messy, so we'll clean it up before parsing
+    # Remove extra spaces and replace '|' with ','
+    data_io = io.StringIO(sheets.replace(' ', ''))
+    df = pd.read_csv(data_io, sep='|', header=0, skiprows=[1])
+    df = df.dropna(axis=1, how='all')
+    df.columns = ['合约交易代码_C', '当前价_C', '涨跌幅_C', '前结价_C', '行权价_C', '合约交易代码_P', '当前价_P', '涨跌幅_P', '前结价_P']
+
+    strikes = df['行权价_C'].astype(float).values
+    prices_c = df['当前价_C'].astype(float).values
+    prices_p = df['当前价_P'].astype(float).values
+
+    # Prepare inputs for `implied_vol`
+    spots = tf.constant(S, dtype=tf.float64)
+    discount_factors = tf.math.exp(tf.constant(-r * t, dtype=tf.float64))
+
+    # Calls
+    is_call_options_c = tf.ones_like(prices_c, dtype=tf.bool)
+    iv_c, _, _ = implied_vol(
+        prices=prices_c,
+        strikes=strikes,
+        expiries=t,
+        spots=spots,
+        discount_factors=discount_factors,
+        is_call_options=is_call_options_c
+    )
+
+    # Puts
+    is_call_options_p = tf.zeros_like(prices_p, dtype=tf.bool)
+    iv_p, _, _ = implied_vol(
+        prices=prices_p,
+        strikes=strikes,
+        expiries=t,
+        spots=spots,
+        discount_factors=discount_factors,
+        is_call_options=is_call_options_p
+    )
+
+    # Prepare inputs for `euro_implied_vol`
+    iv_euro_c = [euro_implied_vol('c', S, k, t, r, q, p) for k, p in zip(strikes, prices_c)]
+    iv_euro_p = [euro_implied_vol('p', S, k, t, r, q, p) for k, p in zip(strikes, prices_p)]
+
+    print("Implied Volatility Comparison")
+    print("-" * 100)
+    print(f"{'Strike':>10} | {'IV (implied_vol) Call':>25} | {'IV (euro_implied_vol) Call':>28} | {'Diff Call':>15}")
+    print("-" * 100)
+    with np.printoptions(suppress=True, precision=6):
+        for i in range(len(strikes)):
+            diff = iv_c.numpy()[i] - iv_euro_c[i] if not np.isnan(iv_euro_c[i]) else np.nan
+            iv_euro_val = iv_euro_c[i] if not np.isnan(iv_euro_c[i]) else np.nan
+            print(f"{strikes[i]:>10.3f} | {iv_c.numpy()[i]:>25.6f} | {iv_euro_val:>28.6f} | {diff:>15.6f}")
+
+    print("\\n" + "-" * 100)
+    print(f"{'Strike':>10} | {'IV (implied_vol) Put':>25} | {'IV (euro_implied_vol) Put':>28} | {'Diff Put':>15}")
+    print("-" * 100)
+    with np.printoptions(suppress=True, precision=6):
+        for i in range(len(strikes)):
+            diff = iv_p.numpy()[i] - iv_euro_p[i] if not np.isnan(iv_euro_p[i]) else np.nan
+            iv_euro_val = iv_euro_p[i] if not np.isnan(iv_euro_p[i]) else np.nan
+            print(f"{strikes[i]:>10.3f} | {iv_p.numpy()[i]:>25.6f} | {iv_euro_val:>28.6f} | {diff:>15.6f}")
